@@ -31,10 +31,10 @@ jobs:
         fi
 
         apt-get update
-        # 2. 补齐基础网络和核心编译工具链
+        # 2. 预先安装好各种高频编译工具，避免组件脚本内部自行调用 apt 触发死锁
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev
+          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https
           
         # 3. 兼容带环境变量包装调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
@@ -61,8 +61,8 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心控制：仅在编译 upmpdcli 或 libupnpp 相关链条时，才去释放本地历史底包
-    - name: Stage Previously Compiled Developer Packages
+    # 核心修正：下载并安装本地底包时，【必须】就地用 apt -f 把它彻底修复至 100% 正常状态
+    - name: Stage and Fully Configure Developer Packages
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         
@@ -79,18 +79,24 @@ jobs:
               wget -q -P /tmp/existing_deps/ "$url"
             done < /tmp/deb_urls.txt
             
-            echo "=== 筛选出真正的核心基础库及 -dev 关键包进行释放 ==="
+            echo "=== 筛选核心开发底包 ==="
             cd /tmp/existing_deps/
             for deb in *.deb; do
-              # 只有基础核心库和开发头文件包才允许进入环境，杜绝应用插件包污染环境
               if echo "$deb" | grep -E -q "(ld-|-dev_|libnpupnp|libupnpp1)"; then
-                echo "📦 允许释放核心底包: $deb"
+                echo "📦 准备释放: $deb"
                 cp "$deb" /tmp/dev_packages/
               fi
             done
             
             if [ "$(ls -A /tmp/dev_packages 2>/dev/null)" ]; then
+              echo "⚙️ 正在释放并强制配置本地开发包依赖链..."
+              # 1. 强塞本地包
               dpkg -i /tmp/dev_packages/*.deb 2>/dev/null || true
+              # 2. 重点：立刻让 apt 进场，把本地包缺少的 libmicrohttpd12t64 等系统库全部强行装上
+              apt-get install -y -f --no-install-recommends
+              # 3. 再次确认，此时本地包必须 100% 处于 "Setting up" 成功的完全体状态！
+              dpkg -i /tmp/dev_packages/*.deb
+              echo "✅ 本地开发底包已完美激活，系统依赖无任何破损！"
             fi
           fi
         else
@@ -122,7 +128,7 @@ jobs:
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
 
-    # 精准控制：利用 mk-build-deps 为当前包安装官方系统依赖，完成闭环
+    # 3. 利用 mk-build-deps 为当前包安装官方系统依赖
     - name: Resolve Precise Dependencies for Target
       run: |
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
@@ -132,17 +138,11 @@ jobs:
           echo "🧹 预先清理修复 APT 状态..."
           apt-get install -y -f --no-install-recommends || true
           
-          echo "🎯 正在通过 mk-build-deps 建立目标组件编译环境（顺藤摸瓜补齐官方开发依赖）..."
-          # 如果预装的核心底包缺少关联的系统开发包（如 libcurl-dev 等），由下方的 -f 机制强制拉取完成闭环
+          echo "🎯 正在通过 mk-build-deps 建立目标组件编译环境..."
           mk-build-deps -i -r -t "apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends" || {
-            echo "⚠️ mk-build-deps 触发联动修复，正在执行系统级强制补齐..."
+            echo "⚠️ mk-build-deps 触发修补..."
             apt-get install -y -f --no-install-recommends
           }
-          
-          # 官方系统底层开发依赖补齐后，重新强刷一下本地底包，确保它们在编译开始前处于就绪状态
-          if [ -d "/tmp/dev_packages" ] && [ "$(ls -A /tmp/dev_packages 2>/dev/null)" ]; then
-            dpkg -i /tmp/dev_packages/*.deb || apt-get install -y -f --no-install-recommends
-          fi
         fi
 
     - name: Execute Build Script
