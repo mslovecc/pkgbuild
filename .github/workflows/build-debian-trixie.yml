@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: bluez-alsa, libnpupnp, libupnpp, upmpdcli)'
+        description: '要编译的组件名称 (例如: libupnpp-bindings, upmpdcli, bluez-alsa)'
         required: true
-        default: 'bluez-alsa'
+        default: 'libupnpp-bindings'
 
 jobs:
   build-trixie:
@@ -31,10 +31,10 @@ jobs:
         fi
 
         apt-get update
-        # 核心修正：添加了 debian-keyring 和 dpkg-dev，彻底解决 dget 下载源码时的签名校验失败、无法解压问题
+        # 补齐基础网络和编译工具，确保包含 meson, python3-dev 以及 pkg-config 等核心组件
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev
+          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev
           
         # 兼容带环境变量赋值调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
@@ -61,7 +61,7 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 使用原生的 curl + GitHub API 获取并安装之前编译好的所有 .deb 依赖包
+    # 核心修正：利用 apt-get install -f 完美补齐 dpkg 安装的本地底层包所需的全部系统开发库
     - name: Pre-install Previously Compiled Dependencies from Release
       run: |
         echo "正在通过 GitHub API 检查已发布的 x86_64 依赖包..."
@@ -79,11 +79,16 @@ jobs:
             wget -q -P /tmp/existing_deps/ "$url"
           done < /tmp/deb_urls.txt
           
-          echo "=== 开始安装这些历史依赖 ==="
+          echo "=== 开始安装并修复这些历史依赖的底层链 ==="
           ls -la /tmp/existing_deps/
           
-          dpkg -i /tmp/existing_deps/*.deb || apt-get install -y -f --no-install-recommends
-          echo "✅ 依赖包本地预装成功！"
+          # 1. 尝试强行释放本地 deb
+          dpkg -i /tmp/existing_deps/*.deb 2>/dev/null || true
+          # 2. 核心补丁：利用 -f 强制要求 apt 去下载这些 deb 声明需要的底层 libcurl-dev / libmicrohttpd-dev
+          apt-get install -y -f --no-install-recommends
+          # 3. 再次确认确保安装成功
+          dpkg -i /tmp/existing_deps/*.deb
+          echo "✅ 历史依赖包及其关联的系统开发库全部补齐成功！"
         else
           echo "ℹ️ 未在 Release 发现任何已有的 .deb 包，可能是首次运行，跳过预安装。"
         fi
