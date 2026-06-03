@@ -22,7 +22,7 @@ jobs:
     steps:
     - name: Prepare Container Environment
       run: |
-        # 核心修正：解锁 Debian Trixie 的 contrib、non-free 和 non-free-firmware 软件源，允许安装 libfdk-aac-dev
+        # 解锁 Debian Trixie 的 contrib、non-free 和 non-free-firmware 软件源
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then
           sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources
         fi
@@ -31,10 +31,10 @@ jobs:
         fi
 
         apt-get update
-        # 补齐基础网络和编译工具，增加了 jq 用来解析 API JSON
+        # 核心修正：添加了 debian-keyring 和 dpkg-dev，彻底解决 dget 下载源码时的签名校验失败、无法解压问题
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config jq
+          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev
           
         # 兼容带环境变量赋值调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
@@ -67,10 +67,7 @@ jobs:
         echo "正在通过 GitHub API 检查已发布的 x86_64 依赖包..."
         mkdir -p /tmp/existing_deps
         
-        # 获取最新的名为 debian-trixie-x86_64 的 release 的全部下载链接
         API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/debian-trixie-x86_64"
-        
-        # 下载所有包含 .deb 后缀的资源
         curl -sL "$API_URL" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' > /tmp/deb_urls.txt
         
         if [ -s /tmp/deb_urls.txt ]; then
@@ -85,7 +82,6 @@ jobs:
           echo "=== 开始安装这些历史依赖 ==="
           ls -la /tmp/existing_deps/
           
-          # 使用 dpkg 安装下载好的底层 deb，若报错用 apt -f 自动补齐更底层的系统依赖
           dpkg -i /tmp/existing_deps/*.deb || apt-get install -y -f --no-install-recommends
           echo "✅ 依赖包本地预装成功！"
         else
