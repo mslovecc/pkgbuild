@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: upmpdcli, bluez-alsa, chromium, libupnpp-bindings)'
+        description: '要编译的组件名称 (例如: upmpdcli, mpd2cdspvolume, bluez-alsa, chromium)'
         required: true
-        default: 'libupnpp-bindings'
+        default: 'mpd2cdspvolume'
 
 jobs:
   build-trixie:
@@ -31,12 +31,16 @@ jobs:
         fi
 
         apt-get update
-        # 2. 预先安装好高频编译工具链、SWIG绑定器及常用底层支持库
+        # 2. 预先安装好基础编译链工具，并额外补齐 mpd2cdspvolume 依赖的 ruby/rpm/fpm 环境
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig
+          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin \
+          apt-transport-https swig ruby ruby-dev rpm
           
-        # 3. 兼容带环境变量包装调用的伪 sudo 脚本
+        # 3. 通过 Ruby Gem 安装 fpm 打包工具（mpd2cdspvolume 强依赖）
+        gem install --no-document fpm
+
+        # 4. 兼容带环境变量包装调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
         #!/bin/sh
         while [ $# -gt 0 ]; do
@@ -61,49 +65,42 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正：当构建绑定库时，如果发现 moOde 里的上游源码过老导致不兼容现代 libupnpp，自动无缝拉取对齐现代版本的稳定包
+    # 针对 Python 绑定老版本不兼容现代 libupnpp 的无缝拉取对齐
     - name: Align Upstream Library Versions
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "libupnpp-bindings" ]; then
           echo "⚠️ 检测到正在编译 Python 绑定库，moOde 自带版本过旧无法匹配新版 libupnpp。"
-          echo "🔄 正在注入现代对齐版源码覆盖旧目录..."
-          rm -rf packages/libupnpp-bindings
-          mkdir -p packages/libupnpp-bindings
-          
-          # 从上游作者仓库获取匹配 libupnpp 1.x 的最新稳定绑定包源码
+          rm -rf packages/libupnpp-bindings && mkdir -p packages/libupnpp-bindings
           git clone --depth 1 https://framagit.org/medoc92/libupnpp-bindings.git /tmp/bindings_new
-          
-          # 迁移现代源码并重新移植构建配置
           cp -r /tmp/bindings_new/* packages/libupnpp-bindings/
           
-          # 如果原厂不含 debian 规约目录，快速从现存模板中恢复或基于 meson 初始化构建规约
           if [ ! -d "packages/libupnpp-bindings/debian" ]; then
              mkdir -p packages/libupnpp-bindings/debian
              cat << 'EOF' > packages/libupnpp-bindings/debian/control
-        Source: libupnpp-bindings
-        Section: python
-        Priority: optional
-        Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>
-        Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev
-        Standards-Version: 4.6.2
+Source: libupnpp-bindings
+Section: python
+Priority: optional
+Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>
+Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev
+Standards-Version: 4.6.2
 
-        Package: python3-upnpp
-        Architecture: any
-        Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}
-        Description: Python3 bindings for libupnpp
-        EOF
+Package: python3-upnpp
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}
+Description: Python3 bindings for libupnpp
+EOF
              cat << 'EOF' > packages/libupnpp-bindings/debian/rules
-        #!/usr/bin/make -f
-        %:
-        	dh $@ --buildsystem=meson
-        EOF
+#!/usr/bin/make -f
+%:
+	dh $@ --buildsystem=meson
+EOF
              chmod +x packages/libupnpp-bindings/debian/rules
              echo "13" > packages/libupnpp-bindings/debian/compat
           fi
         fi
 
-    # 核心控制：释放并打齐底层包
+    # 智能装配：只给 upmpdcli 链条装配历史依赖
     - name: Stage and Fully Configure Developer Packages
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
@@ -170,7 +167,21 @@ jobs:
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
 
-    # 3. 利用 mk-build-deps 为当前包安装官方系统依赖
+    # 核心修正 2：修复 mpd2cdspvolume 脚本内部由于 git clone 产生的路径层级死锁
+    - name: Fix mpd2cdspvolume Internal Script Paths
+      run: |
+        TARGET_PKG="${{ github.event.inputs.package_name }}"
+        if [ "$TARGET_PKG" = "mpd2cdspvolume" ]; then
+          echo "🔧 发现当前包为 mpd2cdspvolume，正在修正其 build.sh 内部的相对路径错位..."
+          BUILD_SCRIPT="packages/mpd2cdspvolume/build.sh"
+          if [ -f "$BUILD_SCRIPT" ]; then
+            # 官方脚本克隆后没 cd 进子目录就去复制文件，我们在克隆命令后强行加上 cd 逻辑
+            sed -i 's/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9 \&\& cd mpd2cdspvolume-*/g' "$BUILD_SCRIPT"
+            # 修正打包完成后回到根目录的路径，确保包文件能顺利被收集到
+            sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
+          fi
+        fi
+
     - name: Resolve Precise Dependencies for Target
       run: |
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
