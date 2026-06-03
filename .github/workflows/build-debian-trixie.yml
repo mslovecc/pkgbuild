@@ -25,11 +25,11 @@ jobs:
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
         if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm
+        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make
         gem install --no-document fpm
-        echo '#!/sh' > /usr/local/bin/sudo
-        echo 'while [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done' >> /usr/local/bin/sudo
-        echo 'exec "$@"' >> /usr/local/bin/sudo
+        
+        # 严格修正：注入绝对合法的伪 sudo 包装器，确保其指向 /bin/sh
+        printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done\nexec "$@"\n' > /usr/local/bin/sudo
         chmod +x /usr/local/bin/sudo
 
     - name: Clone Source Code (Debian Native)
@@ -92,7 +92,7 @@ jobs:
         if [ ! -d "$PKG_DIR" ]; then exit 1; fi
         if [ -f "$PKG_DIR/debian/control" ]; then
           sed -i 's/Architecture: arm64/Architecture: amd64/g' "$PKG_DIR/debian/control"
-          sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PKG_DIR/debian/control"
+          sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PM_DIR/debian/control"
         fi
         find . -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
           sed -i 's/-march=armv8-a+crt//g' "$file"
