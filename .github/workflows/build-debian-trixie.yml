@@ -23,14 +23,14 @@ jobs:
     - name: Prepare Container Environment
       run: |
         apt-get update
+        # 核心修正：在此处添加了 pkg-config，彻底解决 Rust 编译 OpenSSL 的依赖查找错误
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base
+          curl wget ncurses-base pkg-config
           
-        # 核心修复：重写一个高度鲁棒的伪 sudo 脚本，能够智能剥离并在环境中评估诸如 'distro=raspbian' 的变量赋值
+        # 鲁棒的伪 sudo 脚本，完美兼容带环境变量赋值的调用
         cat << 'EOF' > /usr/local/bin/sudo
         #!/bin/sh
-        # 循环剥离并应用开头的环境变量赋值或 -E 标志
         while [ $# -gt 0 ]; do
             case "$1" in
                 -E)
@@ -45,7 +45,6 @@ jobs:
                     ;;
             esac
         done
-        # 此时安全执行真实的剩余指令
         exec "$@"
         EOF
         chmod +x /usr/local/bin/sudo
