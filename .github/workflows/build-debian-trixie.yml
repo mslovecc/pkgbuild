@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: upmpdcli, bluez-alsa, libupnpp-bindings)'
+        description: '要编译的组件名称 (例如: libupnpp-bindings, upmpdcli, bluez-alsa)'
         required: true
-        default: 'upmpdcli'
+        default: 'libupnpp-bindings'
 
 jobs:
   build-trixie:
@@ -31,7 +31,7 @@ jobs:
         fi
 
         apt-get update
-        # 补齐基础网络和编译工具
+        # 补齐基础网络和编译工具，加入 equivs 用来动态生成依赖包
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
           curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev
@@ -61,51 +61,25 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正：智能过滤并允许非必要包的配置失败
-    - name: Pre-install Previously Compiled Dependencies from Release
+    # 1. 释放历史编译过的所有本地 deb 到 dpkg 缓存，不强求它们立刻全部配置成功
+    - name: Stage Previously Compiled Packages
       run: |
-        echo "正在通过 GitHub API 检查已发布的 x86_64 依赖包..."
+        echo "正在通过 GitHub API 下载历史已发布的 x86_64 组件..."
         mkdir -p /tmp/existing_deps
-        mkdir -p /tmp/filtered_deps
         
         API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/debian-trixie-x86_64"
         curl -sL "$API_URL" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' > /tmp/deb_urls.txt
         
         if [ -s /tmp/deb_urls.txt ]; then
-          echo "=== 发现以下历史编译包，开始下载 ==="
-          cat /tmp/deb_urls.txt
-          
           while read -r url; do
-            echo "正在下载: $url"
             wget -q -P /tmp/existing_deps/ "$url"
           done < /tmp/deb_urls.txt
           
-          echo "=== 过滤掉非必须的调试包与特定插件 ==="
-          cd /tmp/existing_deps/
-          for deb in *.deb; do
-            # 排除 dbgsym 调试包、camillagui 以及 upmpdcli-uprcl 插件
-            if echo "$deb" | grep -E -q "(-dbgsym|camillagui|upmpdcli-uprcl)"; then
-              echo "🗑️ 跳过无关或可选包: $deb"
-            else
-              cp "$deb" /tmp/filtered_deps/
-            fi
-          done
-          
-          echo "=== 开始安装必须的核心依赖包 ==="
-          ls -la /tmp/filtered_deps/
-          
-          # 1. 尝试安装过滤后的核心包
-          dpkg -i /tmp/filtered_deps/*.deb 2>/dev/null || true
-          # 2. 补齐依赖
-          apt-get install -y -f --no-install-recommends
-          # 3. 最终确认核心包成功（加 || true 确保即使有边缘包未配置完，也不会中断编译流程）
-          dpkg -i /tmp/filtered_deps/*.deb || true
-          
-          echo "✅ 核心依赖包处理完毕！"
-        else
-          echo "ℹ️ 未在 Release 发现任何已有的 .deb 包，可能是首次运行，跳过预安装。"
+          echo "=== 预释放本地已编译组件 (不强制配置) ==="
+          dpkg -i /tmp/existing_deps/*.deb 2>/dev/null || true
         fi
 
+    # 2. 架构修正
     - name: Patch and Fix ARM Hardcoding
       run: |
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
@@ -130,6 +104,21 @@ jobs:
           sed -i 's/ARCH=arm64/ARCH=amd64/g' "$file"
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
+
+    # 3. 核心修正：仅针对“当前要编译的包”精准安装它所声明需要的开发依赖
+    - name: Resolve Precise Dependencies for Target
+      run: |
+        PKG_DIR="packages/${{ github.event.inputs.package_name }}"
+        cd "$PKG_DIR"
+        
+        if [ -f "debian/control" ]; then
+          echo "🎯 正在分析并精准补齐 ${{ github.event.inputs.package_name }} 的编译依赖..."
+          # 根据当前包的 control 文件生成一个虚拟依赖包，并强制 apt 补齐
+          mk-build-deps -i -r -t "apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends" || true
+          
+          # 依赖补齐后，再次强刷一下本地已释放的包，确保 libupnpp-dev 等处于可用状态
+          dpkg -i /tmp/existing_deps/*.deb 2>/dev/null || true
+        fi
 
     - name: Execute Build Script
       run: |
