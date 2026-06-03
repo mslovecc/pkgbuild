@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: shairport-sync, mpd, upmpdcli)'
+        description: '要编译的组件名称 (例如: shairport-sync, mpd, librespot)'
         required: true
-        default: 'shairport-sync'
+        default: 'librespot'
 
 jobs:
   build-trixie:
@@ -27,11 +27,25 @@ jobs:
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
           curl wget ncurses-base
           
+        # 核心修复：重写一个高度鲁棒的伪 sudo 脚本，能够智能剥离并在环境中评估诸如 'distro=raspbian' 的变量赋值
         cat << 'EOF' > /usr/local/bin/sudo
         #!/bin/sh
-        if [ "$1" = "-E" ]; then
-            shift
-        fi
+        # 循环剥离并应用开头的环境变量赋值或 -E 标志
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -E)
+                    shift
+                    ;;
+                *=*)
+                    export "$1"
+                    shift
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+        done
+        # 此时安全执行真实的剩余指令
         exec "$@"
         EOF
         chmod +x /usr/local/bin/sudo
@@ -89,7 +103,6 @@ jobs:
           echo "❌ 错误: 未找到可执行的编译脚本" && exit 1
         fi
 
-    # 核心修正：利用软链接或者直接在共享卷里寻找所有生成的 .deb，确保 Release 插件在宿主机能百分百抓到文件
     - name: Automatically Publish to GitHub Release
       uses: softprops/action-gh-release@v2
       with:
@@ -98,7 +111,6 @@ jobs:
         body: "这里统一存放移植到 x86_64 平台 (Debian Trixie) 的 moOde 核心组件服务。由 GitHub Actions 自动化编译生成。"
         draft: false
         prerelease: false
-        # 宿主机直接穿透查找 packages 目录下的所有 .deb 文件进行发布（包括子目录、上一级目录等）
         files: |
           ${{ github.workspace }}/packages/**/*.deb
           ${{ github.workspace }}/*.deb
