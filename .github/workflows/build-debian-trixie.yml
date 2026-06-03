@@ -20,40 +20,43 @@ jobs:
     - name: Prepare Container Environment
       run: |
         apt-get update
+        # 核心修复 1：补齐 curl (脚本拉取源码需要) 以及 tput 依赖的 ncurses-base
         apt-get install -y --no-install-recommends \
-          git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates
+          git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
+          curl ncurses-base
+          
+        # 核心修复 2：解决容器内没有 sudo 的问题
+        # 创建一个假的 sudo，直接把参数传给 sh 执行，完美兼容硬编码了 sudo 的脚本
+        echo '#!/bin/sh' > /usr/local/bin/sudo
+        echo '"$@"' >> /usr/local/bin/sudo
+        chmod +x /usr/local/bin/sudo
+        echo "已建立伪 sudo 兼容层"
 
     - name: Clone Source Code (Debian Native)
       run: |
-        # 显式克隆当前仓库和分支，确保代码完整下载到当前工作区
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
         echo "=== 根目录结构 ==="
         ls -la
-        echo "=== packages 目录结构 ==="
-        ls -la packages/ || echo "packages 目录不存在！"
 
     - name: Patch and Fix ARM Hardcoding
       run: |
-        # 核心：拼接上 packages/ 路径
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
         echo "正在优化组件: $PKG_DIR 适配 Debian Trixie (x86_64)..."
         
         if [ ! -d "$PKG_DIR" ]; then
           echo "❌ 错误: 在 packages/ 目录下找不到组件 '${{ github.event.inputs.package_name }}'"
-          echo "请检查输入是否正确。当前 packages/ 目录下的组件有："
-          ls -1 packages/
           exit 1
         fi
 
-        # 1. 强制修改 Debian 架构限制为 amd64
+        # 1. 如果存在 debian 目录则修改架构（虽然 shairport-sync 没有，但别的组件可能有）
         if [ -f "$PKG_DIR/debian/control" ]; then
           sed -i 's/Architecture: arm64/Architecture: amd64/g' "$PKG_DIR/debian/control"
           sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PKG_DIR/debian/control"
-          echo "已将 debian/control 中的架构修改为 amd64"
         fi
 
-        # 2. 深度清除所有针对树莓派/ARM 的硬件编译优化参数
-        find "$PKG_DIR" -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
+        # 2. 深度清除所有针对树莓派/ARM 的硬件编译优化参数（包括全局 scripts 目录下的公共脚本）
+        # 这一步非常重要，因为 shairport-sync 依赖了全局的 scripts/ 文件夹
+        find . -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
           sed -i 's/-march=armv8-a+crt//g' "$file"
           sed -i 's/-march=armv8-a//g' "$file"
           sed -i 's/-mfpu=neon//g' "$file"
@@ -63,33 +66,24 @@ jobs:
           sed -i 's/ARCH=arm64/ARCH=amd64/g' "$file"
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
-        echo "已清除 ARM 硬件特定优化编译参数"
-
-    - name: Auto-install Debian Trixie Dependencies
-      run: |
-        PKG_DIR="packages/${{ github.event.inputs.package_name }}"
-        cd "$PKG_DIR"
-        
-        if [ -d "debian" ]; then
-          echo "正在从 Debian Trixie 源自动下载安装编译依赖..."
-          mk-build-deps -i -r -t "apt-get -o Debug::pkgProblemResolver=yes --no-install-recommends -y" debian/control
-        else
-          echo "未发现 debian 目录，跳过自动依赖安装。"
-        fi
+        echo "已全局清除 ARM 硬件特定优化编译参数"
 
     - name: Execute Build Script
       run: |
-        # 兼容 moOde 编译环境可能需要的环境变量配置
+        # 建立 moOde 编译环境所需的本地配置
         mkdir -p scripts
         cp scripts/setenv.sh.example scripts/setenv.sh 2>/dev/null || true
         
+        # 伪造打包者信息
         export DEBFULLNAME="moOde Debian Trixie Porting"
         export DEBEMAIL="trixie-x86@moode-player.org"
+        # 规避 tput 报错
+        export TERM=xterm
         
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
         cd "$PKG_DIR"
         
-        # 执行编译
+        # 优先执行 build.sh 或 compile.sh
         if [ -f "./build.sh" ]; then
           chmod +x ./build.sh
           ./build.sh
@@ -99,14 +93,14 @@ jobs:
         elif [ -f "debian/rules" ]; then
           dpkg-buildpackage -us -uc -b
         else
-          echo "❌ 错误: 未找到可执行的编译脚本或 debian/rules" && exit 1
+          echo "❌ 错误: 未找到可执行的编译脚本" && exit 1
         fi
 
     - name: Collect and Upload Trixie .deb Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: moode-trixie-x86_64-${{ github.event.inputs.package_name }}
-        # 收集该组件目录下以及其上一级目录（也就是 packages/ 目录下）生成的所有 .deb 文件
+        # 考虑到 moOde 脚本打包的落脚点可能在各个地方，我们扩大搜索范围搜索编译出的 .deb 文件
         path: |
-          packages/${{ github.event.inputs.package_name }}/**/*.deb
-          packages/*.deb
+          ./**/*.deb
+          ../**/*.deb
