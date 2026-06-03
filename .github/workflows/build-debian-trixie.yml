@@ -12,6 +12,10 @@ jobs:
   build-trixie:
     runs-on: ubuntu-latest
 
+    # 必须赋予 Actions 写入 Release 的权限
+    permissions:
+      contents: write
+
     container:
       image: debian:trixie-slim
       options: --user root
@@ -86,12 +90,22 @@ jobs:
           echo "❌ 错误: 未找到可执行的编译脚本" && exit 1
         fi
 
-    - name: Collect and Upload Trixie .deb Artifacts
-      uses: actions/upload-artifact@v4
+    # 新增步骤：将分散在各处的 .deb 收集到一个干净的临时目录，避免 Release 插件上传错乱
+    - name: Stage Artifacts for Release
+      run: |
+        mkdir -p ${{ github.workspace }}/release_artifacts
+        find ${{ github.workspace }}/packages -name "*.deb" -exec cp {} ${{ github.workspace }}/release_artifacts/ \;
+        echo "已收集以下准备发布的安装包："
+        ls -la ${{ github.workspace }}/release_artifacts/
+
+    # 核心步骤：自动发布或追加到已有的 Release 页面中
+    - name: Automatically Publish to GitHub Release
+      uses: softprops/action-gh-release@v2
       with:
-        name: moode-trixie-x86_64-${{ github.event.inputs.package_name }}
-        # 核心修复：使用全局绝对路径统配，全面捕捉所有可能产生 .deb 的目录
-        path: |
-          ${{ github.workspace }}/packages/${{ github.event.inputs.package_name }}/**/*.deb
-          ${{ github.workspace }}/packages/${{ github.event.inputs.package_name }}/*.deb
-          ${{ github.workspace }}/packages/**/*.deb
+        tag_name: "debian-trixie-x86_64"     # Release 的标签名（固定，方便把所有组件堆在一起）
+        name: "moOde Packages for Debian Trixie (x86_64)"  # Release 的标题
+        body: "这里统一存放移植到 x86_64 平台 (Debian Trixie) 的 moOde 核心组件服务。由 GitHub Actions 自动化编译生成。"
+        draft: false
+        prerelease: false
+        files: |
+          ${{ github.workspace }}/release_artifacts/*.deb
