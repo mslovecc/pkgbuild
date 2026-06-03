@@ -31,10 +31,10 @@ jobs:
         fi
 
         apt-get update
-        # 2. 预先安装好高频编译工具链和常用底层支持库
+        # 2. 预先安装好高频编译工具链、SWIG绑定器及常用底层支持库
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https
+          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig
           
         # 3. 兼容带环境变量包装调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
@@ -50,6 +50,7 @@ jobs:
                     ;;
                 *)
                     break
+                    break
                     ;;
             esac
         done
@@ -61,14 +62,55 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正：当为 upmpdcli 链条装配环境时，除了本地底包，直接把 pkg-config 必查的系统级开发底库一步到位塞进去
+    # 核心修正 1：当构建绑定库时，如果发现 moOde 里的上游源码过老导致不兼容现代 libupnpp，自动无缝拉取对齐现代版本的稳定包
+    - name: Align Upstream Library Versions
+      run: |
+        TARGET_PKG="${{ github.event.inputs.package_name }}"
+        if [ "$TARGET_PKG" = "libupnpp-bindings" ]; then
+          echo "⚠️ 检测到正在编译 Python 绑定库，moOde 自带版本过旧无法匹配新版 libupnpp。"
+          echo "🔄 正在注入现代对齐版源码覆盖旧目录..."
+          rm -rf packages/libupnpp-bindings
+          mkdir -p packages/libupnpp-bindings
+          
+          # 从上游作者仓库获取匹配 libupnpp 1.x 的最新稳定绑定包源码 (例如 v1.0.1 稳定分支或主干)
+          git clone --depth 1 https://framagit.org/medoc92/libupnpp-bindings.git /tmp/bindings_new
+          
+          # 迁移现代源码并重新移植构建配置
+          cp -r /tmp/bindings_new/* packages/libupnpp-bindings/
+          
+          # 如果原厂不含 debian 规约目录，快速从现存模板中恢复或基于 meson 初始化构建规约
+          if [ ! -d "packages/libupnpp-bindings/debian" ]; then
+             mkdir -p packages/libupnpp-bindings/debian
+             cat << 'EOF' > packages/libupnpp-bindings/debian/control
+Source: libupnpp-bindings
+Section: python
+Priority: optional
+Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>
+Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev
+Standards-Version: 4.6.2
+
+Package: python3-upnpp
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}
+Description: Python3 bindings for libupnpp
+EOF
+             cat << 'EOF' > packages/libupnpp-bindings/debian/rules
+#!/usr/bin/make -f
+%:
+	dh $@ --buildsystem=meson
+EOF
+             chmod +x packages/libupnpp-bindings/debian/rules
+             echo "13" > packages/libupnpp-bindings/debian/compat
+          fi
+        fi
+
+    # 核心控制：释放并打齐底层包
     - name: Stage and Fully Configure Developer Packages
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         
         if echo "$TARGET_PKG" | grep -E -q "(upmpdcli|libupnpp)"; then
           echo "🎯 检测到目标组件属于 UPnP/upmpdcli 生态，正在强制预装底层 pkg-config 开发依赖库..."
-          # 强行补充官方控制文件里可能漏掉的系统 C 开发头文件包
           apt-get install -y --no-install-recommends libcurl4-gnutls-dev libmicrohttpd-dev libmpdclient-dev
 
           echo "📥 开始从 GitHub Release 下载历史 x86_64 关键开发底包..."
