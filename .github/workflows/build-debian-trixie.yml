@@ -37,7 +37,7 @@ jobs:
           curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin \
           apt-transport-https swig ruby ruby-dev rpm
           
-        # 3. 通过 Ruby Gem 安装 fpm 打包工具（mpd2cdspvolume 强依赖）
+        # 3. 通过 Ruby Gem 安装 fpm 打包工具
         gem install --no-document fpm
 
         # 4. 兼容带环境变量包装调用的伪 sudo 脚本
@@ -167,19 +167,14 @@ EOF
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
 
-    # 核心修正 2：修复 mpd2cdspvolume 脚本内部由于 git clone 产生的路径层级死锁
+    # 核心修正：单行极简正则替换，杜绝多行嵌套引发的 YAML 解析失败
     - name: Fix mpd2cdspvolume Internal Script Paths
       run: |
-        TARGET_PKG="${{ github.event.inputs.package_name }}"
-        if [ "$TARGET_PKG" = "mpd2cdspvolume" ]; then
-          echo "🔧 发现当前包为 mpd2cdspvolume，正在修正其 build.sh 内部的相对路径错位..."
-          BUILD_SCRIPT="packages/mpd2cdspvolume/build.sh"
-          if [ -f "$BUILD_SCRIPT" ]; then
-            # 官方脚本克隆后没 cd 进子目录就去复制文件，我们在克隆命令后强行加上 cd 逻辑
-            sed -i 's/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9 \&\& cd mpd2cdspvolume-*/g' "$BUILD_SCRIPT"
-            # 修正打包完成后回到根目录的路径，确保包文件能顺利被收集到
-            sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
-          fi
+        BUILD_SCRIPT="packages/mpd2cdspvolume/build.sh"
+        if [ -f "$BUILD_SCRIPT" ]; then
+          echo "🔧 正在修正 mpd2cdspvolume 的 build.sh 相对路径死锁..."
+          sed -i 's/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9 \&\& cd mpd2cdspvolume-*/g' "$BUILD_SCRIPT"
+          sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
 
     - name: Resolve Precise Dependencies for Target
