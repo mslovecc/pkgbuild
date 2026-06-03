@@ -20,46 +20,37 @@ jobs:
     - name: Prepare Container Environment
       run: |
         apt-get update
-        # 核心修复 1：安装 wget (解决本次报错的关键)
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
           curl wget ncurses-base
           
-        # 核心修复 2：升级高级伪 sudo 兼容层，完美支持 `sudo -E` 传参
         cat << 'EOF' > /usr/local/bin/sudo
         #!/bin/sh
-        # 如果第一个参数是 -E，则将其剔除，把后面的参数当做命令跑
         if [ "$1" = "-E" ]; then
             shift
         fi
         exec "$@"
         EOF
         chmod +x /usr/local/bin/sudo
-        echo "已建立支持 -E 传参的伪 sudo 兼容层"
 
     - name: Clone Source Code (Debian Native)
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
-        echo "=== 根目录结构 ==="
-        ls -la
 
     - name: Patch and Fix ARM Hardcoding
       run: |
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
-        echo "正在优化组件: $PKG_DIR 适配 Debian Trixie (x86_64)..."
         
         if [ ! -d "$PKG_DIR" ]; then
           echo "❌ 错误: 在 packages/ 目录下找不到组件 '${{ github.event.inputs.package_name }}'"
           exit 1
         fi
 
-        # 1. 架构修改为 amd64
         if [ -f "$PKG_DIR/debian/control" ]; then
           sed -i 's/Architecture: arm64/Architecture: amd64/g' "$PKG_DIR/debian/control"
           sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PKG_DIR/debian/control"
         fi
 
-        # 2. 全局清除所有针对树莓派/ARM 的硬件编译优化参数
         find . -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
           sed -i 's/-march=armv8-a+crt//g' "$file"
           sed -i 's/-march=armv8-a//g' "$file"
@@ -70,7 +61,6 @@ jobs:
           sed -i 's/ARCH=arm64/ARCH=amd64/g' "$file"
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
-        echo "已全局清除 ARM 硬件特定优化编译参数"
 
     - name: Execute Build Script
       run: |
@@ -100,6 +90,8 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: moode-trixie-x86_64-${{ github.event.inputs.package_name }}
+        # 核心修复：使用全局绝对路径统配，全面捕捉所有可能产生 .deb 的目录
         path: |
-          ./**/*.deb
-          ../**/*.deb
+          ${{ github.workspace }}/packages/${{ github.event.inputs.package_name }}/**/*.deb
+          ${{ github.workspace }}/packages/${{ github.event.inputs.package_name }}/*.deb
+          ${{ github.workspace }}/packages/**/*.deb
