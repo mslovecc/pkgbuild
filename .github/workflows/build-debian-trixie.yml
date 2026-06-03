@@ -23,9 +23,10 @@ jobs:
     - name: Prepare Container Environment
       run: |
         apt-get update
+        # 补齐基础网络和编译工具，增加了 jq 用来解析 API JSON
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config
+          curl wget ncurses-base pkg-config jq
           
         # 兼容带环境变量赋值调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
@@ -52,24 +53,35 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 新增步骤：如果发现之前已经发布过其他底层 deb 包，自动下载并预安装到容器中，解除类似 libupnpp 的依赖死锁
+    # 核心修正：使用原生的 curl + GitHub API 获取并安装之前编译好的所有 .deb 依赖包
     - name: Pre-install Previously Compiled Dependencies from Release
-      env:
-        GH_TOKEN: ${{ github.token }}
       run: |
-        echo "正在检查是否存在已有的 x86_64 依赖包..."
+        echo "正在通过 GitHub API 检查已发布的 x86_64 依赖包..."
         mkdir -p /tmp/existing_deps
         
-        # 使用 GitHub CLI 尝试下载该 Tag 下所有已生成的 deb 包
-        if gh release download debian-trixie-x86_64 --pattern "*.deb" --dir /tmp/existing_deps --repo ${{ github.repository }} 2>/dev/null; then
-          echo "=== 发现并下载了以下已有依赖包 ==="
+        # 获取最新的名为 debian-trixie-x86_64 的 release 的全部下载链接
+        API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/debian-trixie-x86_64"
+        
+        # 下载所有包含 .deb 后缀的资源
+        curl -sL "$API_URL" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' > /tmp/deb_urls.txt
+        
+        if [ -s /tmp/deb_urls.txt ]; then
+          echo "=== 发现以下历史编译包，开始下载 ==="
+          cat /tmp/deb_urls.txt
+          
+          while read -r url; do
+            echo "正在下载: $url"
+            wget -q -P /tmp/existing_deps/ "$url"
+          done < /tmp/deb_urls.txt
+          
+          echo "=== 开始安装这些历史依赖 ==="
           ls -la /tmp/existing_deps/
           
-          echo "正在预安装这些依赖包到当前编译环境..."
-          # 使用 dpkg 安装，如有缺少依赖用 apt-get -f install 修复
+          # 使用 dpkg 安装下载好的底层 deb，若报错用 apt -f 自动补齐更底层的系统依赖
           dpkg -i /tmp/existing_deps/*.deb || apt-get install -y -f --no-install-recommends
+          echo "✅ 依赖包本地预装成功！"
         else
-          echo "ℹ️ 未发现已有的 Release 依赖包或 Release 尚未创建，跳过预安装。"
+          echo "ℹ️ 未在 Release 发现任何已有的 .deb 包，可能是首次运行，跳过预安装。"
         fi
 
     - name: Patch and Fix ARM Hardcoding
