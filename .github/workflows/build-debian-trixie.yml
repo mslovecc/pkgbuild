@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: shairport-sync, mpd, librespot)'
+        description: '要编译的组件名称 (例如: libnpupnp, libupnpp, upmpdcli, mpd)'
         required: true
-        default: 'librespot'
+        default: 'libnpupnp'
 
 jobs:
   build-trixie:
@@ -23,12 +23,11 @@ jobs:
     - name: Prepare Container Environment
       run: |
         apt-get update
-        # 核心修正：在此处添加了 pkg-config，彻底解决 Rust 编译 OpenSSL 的依赖查找错误
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
           curl wget ncurses-base pkg-config
           
-        # 鲁棒的伪 sudo 脚本，完美兼容带环境变量赋值的调用
+        # 兼容带环境变量赋值调用的伪 sudo 脚本
         cat << 'EOF' > /usr/local/bin/sudo
         #!/bin/sh
         while [ $# -gt 0 ]; do
@@ -52,6 +51,26 @@ jobs:
     - name: Clone Source Code (Debian Native)
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
+
+    # 新增步骤：如果发现之前已经发布过其他底层 deb 包，自动下载并预安装到容器中，解除类似 libupnpp 的依赖死锁
+    - name: Pre-install Previously Compiled Dependencies from Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "正在检查是否存在已有的 x86_64 依赖包..."
+        mkdir -p /tmp/existing_deps
+        
+        # 使用 GitHub CLI 尝试下载该 Tag 下所有已生成的 deb 包
+        if gh release download debian-trixie-x86_64 --pattern "*.deb" --dir /tmp/existing_deps --repo ${{ github.repository }} 2>/dev/null; then
+          echo "=== 发现并下载了以下已有依赖包 ==="
+          ls -la /tmp/existing_deps/
+          
+          echo "正在预安装这些依赖包到当前编译环境..."
+          # 使用 dpkg 安装，如有缺少依赖用 apt-get -f install 修复
+          dpkg -i /tmp/existing_deps/*.deb || apt-get install -y -f --no-install-recommends
+        else
+          echo "ℹ️ 未发现已有的 Release 依赖包或 Release 尚未创建，跳过预安装。"
+        fi
 
     - name: Patch and Fix ARM Hardcoding
       run: |
