@@ -6,7 +6,7 @@ on:
       package_name:
         description: '要编译的组件名称 (例如: upmpdcli, bluez-alsa, chromium, libupnpp-bindings)'
         required: true
-        default: 'upmpdcli'
+        default: 'libupnpp-bindings'
 
 jobs:
   build-trixie:
@@ -31,7 +31,7 @@ jobs:
         fi
 
         apt-get update
-        # 2. 预先安装好各种高频编译工具，避免组件脚本内部自行调用 apt 触发死锁
+        # 2. 预先安装好高频编译工具链和常用底层支持库
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
           curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https
@@ -61,13 +61,17 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正：下载并安装本地底包时，【必须】就地用 apt -f 把它彻底修复至 100% 正常状态
+    # 核心修正：当为 upmpdcli 链条装配环境时，除了本地底包，直接把 pkg-config 必查的系统级开发底库一步到位塞进去
     - name: Stage and Fully Configure Developer Packages
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         
         if echo "$TARGET_PKG" | grep -E -q "(upmpdcli|libupnpp)"; then
-          echo "🎯 检测到目标组件为 $TARGET_PKG，正在从 GitHub Release 下载历史 x86_64 关键开发底包..."
+          echo "🎯 检测到目标组件属于 UPnP/upmpdcli 生态，正在强制预装底层 pkg-config 开发依赖库..."
+          # 强行补充官方控制文件里可能漏掉的系统 C 开发头文件包
+          apt-get install -y --no-install-recommends libcurl4-gnutls-dev libmicrohttpd-dev libmpdclient-dev
+
+          echo "📥 开始从 GitHub Release 下载历史 x86_64 关键开发底包..."
           mkdir -p /tmp/existing_deps
           mkdir -p /tmp/dev_packages
           
@@ -89,14 +93,11 @@ jobs:
             done
             
             if [ "$(ls -A /tmp/dev_packages 2>/dev/null)" ]; then
-              echo "⚙️ 正在释放并强制配置本地开发包依赖链..."
-              # 1. 强塞本地包
+              echo "⚙️ 正在释放并配置本地开发包依赖链..."
               dpkg -i /tmp/dev_packages/*.deb 2>/dev/null || true
-              # 2. 重点：立刻让 apt 进场，把本地包缺少的 libmicrohttpd12t64 等系统库全部强行装上
               apt-get install -y -f --no-install-recommends
-              # 3. 再次确认，此时本地包必须 100% 处于 "Setting up" 成功的完全体状态！
               dpkg -i /tmp/dev_packages/*.deb
-              echo "✅ 本地开发底包已完美激活，系统依赖无任何破损！"
+              echo "✅ 本地开发底包以及系统依赖全部配置成功！"
             fi
           fi
         else
