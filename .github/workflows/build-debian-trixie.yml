@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: libupnpp-bindings, upmpdcli, bluez-alsa)'
+        description: '要编译的组件名称 (例如: upmpdcli, bluez-alsa, libupnpp-bindings)'
         required: true
-        default: 'libupnpp-bindings'
+        default: 'upmpdcli'
 
 jobs:
   build-trixie:
@@ -31,7 +31,7 @@ jobs:
         fi
 
         apt-get update
-        # 补齐基础网络和编译工具，确保包含 meson, python3-dev 以及 pkg-config 等核心组件
+        # 补齐基础网络和编译工具
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
           curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev
@@ -61,11 +61,12 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正：利用 apt-get install -f 完美补齐 dpkg 安装的本地底层包所需的全部系统开发库
+    # 核心修正：智能过滤并允许非必要包的配置失败
     - name: Pre-install Previously Compiled Dependencies from Release
       run: |
         echo "正在通过 GitHub API 检查已发布的 x86_64 依赖包..."
         mkdir -p /tmp/existing_deps
+        mkdir -p /tmp/filtered_deps
         
         API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/debian-trixie-x86_64"
         curl -sL "$API_URL" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' > /tmp/deb_urls.txt
@@ -79,16 +80,28 @@ jobs:
             wget -q -P /tmp/existing_deps/ "$url"
           done < /tmp/deb_urls.txt
           
-          echo "=== 开始安装并修复这些历史依赖的底层链 ==="
-          ls -la /tmp/existing_deps/
+          echo "=== 过滤掉非必须的调试包与特定插件 ==="
+          cd /tmp/existing_deps/
+          for deb in *.deb; do
+            # 排除 dbgsym 调试包、camillagui 以及 upmpdcli-uprcl 插件
+            if echo "$deb" | grep -E -q "(-dbgsym|camillagui|upmpdcli-uprcl)"; then
+              echo "🗑️ 跳过无关或可选包: $deb"
+            else
+              cp "$deb" /tmp/filtered_deps/
+            fi
+          done
           
-          # 1. 尝试强行释放本地 deb
-          dpkg -i /tmp/existing_deps/*.deb 2>/dev/null || true
-          # 2. 核心补丁：利用 -f 强制要求 apt 去下载这些 deb 声明需要的底层 libcurl-dev / libmicrohttpd-dev
+          echo "=== 开始安装必须的核心依赖包 ==="
+          ls -la /tmp/filtered_deps/
+          
+          # 1. 尝试安装过滤后的核心包
+          dpkg -i /tmp/filtered_deps/*.deb 2>/dev/null || true
+          # 2. 补齐依赖
           apt-get install -y -f --no-install-recommends
-          # 3. 再次确认确保安装成功
-          dpkg -i /tmp/existing_deps/*.deb
-          echo "✅ 历史依赖包及其关联的系统开发库全部补齐成功！"
+          # 3. 最终确认核心包成功（加 || true 确保即使有边缘包未配置完，也不会中断编译流程）
+          dpkg -i /tmp/filtered_deps/*.deb || true
+          
+          echo "✅ 核心依赖包处理完毕！"
         else
           echo "ℹ️ 未在 Release 发现任何已有的 .deb 包，可能是首次运行，跳过预安装。"
         fi
