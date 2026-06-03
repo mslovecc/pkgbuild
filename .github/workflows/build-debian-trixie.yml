@@ -50,7 +50,6 @@ jobs:
                     ;;
                 *)
                     break
-                    break
                     ;;
             esac
         done
@@ -62,7 +61,7 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正 1：当构建绑定库时，如果发现 moOde 里的上游源码过老导致不兼容现代 libupnpp，自动无缝拉取对齐现代版本的稳定包
+    # 核心修正：当构建绑定库时，如果发现 moOde 里的上游源码过老导致不兼容现代 libupnpp，自动无缝拉取对齐现代版本的稳定包
     - name: Align Upstream Library Versions
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
@@ -72,7 +71,7 @@ jobs:
           rm -rf packages/libupnpp-bindings
           mkdir -p packages/libupnpp-bindings
           
-          # 从上游作者仓库获取匹配 libupnpp 1.x 的最新稳定绑定包源码 (例如 v1.0.1 稳定分支或主干)
+          # 从上游作者仓库获取匹配 libupnpp 1.x 的最新稳定绑定包源码
           git clone --depth 1 https://framagit.org/medoc92/libupnpp-bindings.git /tmp/bindings_new
           
           # 迁移现代源码并重新移植构建配置
@@ -82,23 +81,23 @@ jobs:
           if [ ! -d "packages/libupnpp-bindings/debian" ]; then
              mkdir -p packages/libupnpp-bindings/debian
              cat << 'EOF' > packages/libupnpp-bindings/debian/control
-Source: libupnpp-bindings
-Section: python
-Priority: optional
-Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>
-Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev
-Standards-Version: 4.6.2
+        Source: libupnpp-bindings
+        Section: python
+        Priority: optional
+        Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>
+        Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev
+        Standards-Version: 4.6.2
 
-Package: python3-upnpp
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}
-Description: Python3 bindings for libupnpp
-EOF
+        Package: python3-upnpp
+        Architecture: any
+        Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}
+        Description: Python3 bindings for libupnpp
+        EOF
              cat << 'EOF' > packages/libupnpp-bindings/debian/rules
-#!/usr/bin/make -f
-%:
-	dh $@ --buildsystem=meson
-EOF
+        #!/usr/bin/make -f
+        %:
+        	dh $@ --buildsystem=meson
+        EOF
              chmod +x packages/libupnpp-bindings/debian/rules
              echo "13" > packages/libupnpp-bindings/debian/compat
           fi
