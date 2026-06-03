@@ -22,140 +22,78 @@ jobs:
     steps:
     - name: Prepare Container Environment
       run: |
-        # 1. 解锁 Debian Trixie 的 contrib、non-free 和 non-free-firmware 软件源
-        if [ -f /etc/apt/sources.list.d/debian.sources ]; then
-          sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources
-        fi
-        if [ -f /etc/apt/sources.list ]; then
-          sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list
-        fi
-
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
+        if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        # 2. 预先安装好基础编译链工具，并额外补齐 mpd2cdspvolume 依赖的 ruby/rpm/fpm 环境
-        apt-get install -y --no-install-recommends \
-          git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin \
-          apt-transport-https swig ruby ruby-dev rpm
-          
-        # 3. 通过 Ruby Gem 安装 fpm 打包工具
+        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm
         gem install --no-document fpm
-
-        # 4. 兼容带环境变量包装调用的伪 sudo 脚本
-        cat << 'EOF' > /usr/local/bin/sudo
-        #!/bin/sh
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                -E)
-                    shift
-                    ;;
-                *=*)
-                    export "$1"
-                    shift
-                    ;;
-                *)
-                    break
-                    ;;
-            esac
-        done
-        exec "$@"
-        EOF
+        echo '#!/sh' > /usr/local/bin/sudo
+        echo 'while [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done' >> /usr/local/bin/sudo
+        echo 'exec "$@"' >> /usr/local/bin/sudo
         chmod +x /usr/local/bin/sudo
 
     - name: Clone Source Code (Debian Native)
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 针对 Python 绑定老版本不兼容现代 libupnpp 的无缝拉取对齐
     - name: Align Upstream Library Versions
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "libupnpp-bindings" ]; then
-          echo "⚠️ 检测到正在编译 Python 绑定库，moOde 自带版本过旧无法匹配新版 libupnpp。"
           rm -rf packages/libupnpp-bindings && mkdir -p packages/libupnpp-bindings
           git clone --depth 1 https://framagit.org/medoc92/libupnpp-bindings.git /tmp/bindings_new
           cp -r /tmp/bindings_new/* packages/libupnpp-bindings/
-          
           if [ ! -d "packages/libupnpp-bindings/debian" ]; then
              mkdir -p packages/libupnpp-bindings/debian
-             cat << 'EOF' > packages/libupnpp-bindings/debian/control
-Source: libupnpp-bindings
-Section: python
-Priority: optional
-Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>
-Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev
-Standards-Version: 4.6.2
-
-Package: python3-upnpp
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends}
-Description: Python3 bindings for libupnpp
-EOF
-             cat << 'EOF' > packages/libupnpp-bindings/debian/rules
-#!/usr/bin/make -f
-%:
-	dh $@ --buildsystem=meson
-EOF
+             echo "Source: libupnpp-bindings" > packages/libupnpp-bindings/debian/control
+             echo "Section: python" >> packages/libupnpp-bindings/debian/control
+             echo "Priority: optional" >> packages/libupnpp-bindings/debian/control
+             echo "Maintainer: moOde Debian Trixie Porting <trixie-x86@moode-player.org>" >> packages/libupnpp-bindings/debian/control
+             echo "Build-Depends: debhelper-compat (= 13), meson, python3-dev, swig, libupnpp-dev" >> packages/libupnpp-bindings/debian/control
+             echo "Standards-Version: 4.6.2" >> packages/libupnpp-bindings/debian/control
+             echo "" >> packages/libupnpp-bindings/debian/control
+             echo "Package: python3-upnpp" >> packages/libupnpp-bindings/debian/control
+             echo "Architecture: any" >> packages/libupnpp-bindings/debian/control
+             echo "Depends: \${shlibs:Depends}, \${misc:Depends}, \${python3:Depends}" >> packages/libupnpp-bindings/debian/control
+             echo "Description: Python3 bindings for libupnpp" >> packages/libupnpp-bindings/debian/control
+             echo '#!/usr/bin/make -f' > packages/libupnpp-bindings/debian/rules
+             echo '%:' >> packages/libupnpp-bindings/debian/rules
+             echo '	dh $@ --buildsystem=meson' >> packages/libupnpp-bindings/debian/rules
              chmod +x packages/libupnpp-bindings/debian/rules
              echo "13" > packages/libupnpp-bindings/debian/compat
           fi
         fi
 
-    # 智能装配：只给 upmpdcli 链条装配历史依赖
     - name: Stage and Fully Configure Developer Packages
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
-        
         if echo "$TARGET_PKG" | grep -E -q "(upmpdcli|libupnpp)"; then
-          echo "🎯 检测到目标组件属于 UPnP/upmpdcli 生态，正在强制预装底层 pkg-config 开发依赖库..."
           apt-get install -y --no-install-recommends libcurl4-gnutls-dev libmicrohttpd-dev libmpdclient-dev
-
-          echo "📥 开始从 GitHub Release 下载历史 x86_64 关键开发底包..."
-          mkdir -p /tmp/existing_deps
-          mkdir -p /tmp/dev_packages
-          
+          mkdir -p /tmp/existing_deps /tmp/dev_packages
           API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/debian-trixie-x86_64"
           curl -sL "$API_URL" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' > /tmp/deb_urls.txt
-          
           if [ -s /tmp/deb_urls.txt ]; then
-            while read -r url; do
-              wget -q -P /tmp/existing_deps/ "$url"
-            done < /tmp/deb_urls.txt
-            
-            echo "=== 筛选核心开发底包 ==="
+            while read -r url; do wget -q -P /tmp/existing_deps/ "$url"; done < /tmp/deb_urls.txt
             cd /tmp/existing_deps/
             for deb in *.deb; do
-              if echo "$deb" | grep -E -q "(ld-|-dev_|libnpupnp|libupnpp1)"; then
-                echo "📦 准备释放: $deb"
-                cp "$deb" /tmp/dev_packages/
-              fi
+              if echo "$deb" | grep -E -q "(ld-|-dev_|libnpupnp|libupnpp1)"; then cp "$deb" /tmp/dev_packages/; fi
             done
-            
             if [ "$(ls -A /tmp/dev_packages 2>/dev/null)" ]; then
-              echo "⚙️ 正在释放并配置本地开发包依赖链..."
               dpkg -i /tmp/dev_packages/*.deb 2>/dev/null || true
               apt-get install -y -f --no-install-recommends
               dpkg -i /tmp/dev_packages/*.deb
-              echo "✅ 本地开发底包以及系统依赖全部配置成功！"
             fi
           fi
-        else
-          echo "ℹ️ 当前目标组件为 $TARGET_PKG，属于独立构建，跳过本地历史依赖包装配。"
         fi
 
     - name: Patch and Fix ARM Hardcoding
       run: |
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
-        
-        if [ ! -d "$PKG_DIR" ]; then
-          echo "❌ 错误: 在 packages/ 目录下找不到组件 '${{ github.event.inputs.package_name }}'"
-          exit 1
-        fi
-
+        if [ ! -d "$PKG_DIR" ]; then exit 1; fi
         if [ -f "$PKG_DIR/debian/control" ]; then
           sed -i 's/Architecture: arm64/Architecture: amd64/g' "$PKG_DIR/debian/control"
           sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PKG_DIR/debian/control"
         fi
-
         find . -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
           sed -i 's/-march=armv8-a+crt//g' "$file"
           sed -i 's/-march=armv8-a//g' "$file"
@@ -167,12 +105,10 @@ EOF
           sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
         done
 
-    # 核心修正：单行极简正则替换，杜绝多行嵌套引发的 YAML 解析失败
     - name: Fix mpd2cdspvolume Internal Script Paths
       run: |
         BUILD_SCRIPT="packages/mpd2cdspvolume/build.sh"
         if [ -f "$BUILD_SCRIPT" ]; then
-          echo "🔧 正在修正 mpd2cdspvolume 的 build.sh 相对路径死锁..."
           sed -i 's/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9/git checkout bb5e81bb3f561dac6950a6d816a132fd5873e3e9 \&\& cd mpd2cdspvolume-*/g' "$BUILD_SCRIPT"
           sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
@@ -181,30 +117,20 @@ EOF
       run: |
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
         cd "$PKG_DIR"
-        
         if [ -f "debian/control" ]; then
-          echo "🧹 预先清理修复 APT 状态..."
           apt-get install -y -f --no-install-recommends || true
-          
-          echo "🎯 正在通过 mk-build-deps 建立目标组件编译环境..."
-          mk-build-deps -i -r -t "apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends" || {
-            echo "⚠️ mk-build-deps 触发修补..."
-            apt-get install -y -f --no-install-recommends
-          }
+          mk-build-deps -i -r -t "apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends" || apt-get install -y -f --no-install-recommends
         fi
 
     - name: Execute Build Script
       run: |
         mkdir -p scripts
         cp scripts/setenv.sh.example scripts/setenv.sh 2>/dev/null || true
-        
         export DEBFULLNAME="moOde Debian Trixie Porting"
         export DEBEMAIL="trixie-x86@moode-player.org"
         export TERM=xterm
-        
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
         cd "$PKG_DIR"
-        
         if [ -f "./build.sh" ]; then
           chmod +x ./build.sh
           ./build.sh
@@ -214,7 +140,7 @@ EOF
         elif [ -f "debian/rules" ]; then
           dpkg-buildpackage -us -uc -b
         else
-          echo "❌ 错误: 未找到可执行的编译脚本" && exit 1
+          exit 1
         fi
 
     - name: Automatically Publish to GitHub Release
