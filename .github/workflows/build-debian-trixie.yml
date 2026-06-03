@@ -20,17 +20,22 @@ jobs:
     - name: Prepare Container Environment
       run: |
         apt-get update
-        # 核心修复 1：补齐 curl (脚本拉取源码需要) 以及 tput 依赖的 ncurses-base
+        # 核心修复 1：安装 wget (解决本次报错的关键)
         apt-get install -y --no-install-recommends \
           git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates \
-          curl ncurses-base
+          curl wget ncurses-base
           
-        # 核心修复 2：解决容器内没有 sudo 的问题
-        # 创建一个假的 sudo，直接把参数传给 sh 执行，完美兼容硬编码了 sudo 的脚本
-        echo '#!/bin/sh' > /usr/local/bin/sudo
-        echo '"$@"' >> /usr/local/bin/sudo
+        # 核心修复 2：升级高级伪 sudo 兼容层，完美支持 `sudo -E` 传参
+        cat << 'EOF' > /usr/local/bin/sudo
+        #!/bin/sh
+        # 如果第一个参数是 -E，则将其剔除，把后面的参数当做命令跑
+        if [ "$1" = "-E" ]; then
+            shift
+        fi
+        exec "$@"
+        EOF
         chmod +x /usr/local/bin/sudo
-        echo "已建立伪 sudo 兼容层"
+        echo "已建立支持 -E 传参的伪 sudo 兼容层"
 
     - name: Clone Source Code (Debian Native)
       run: |
@@ -48,14 +53,13 @@ jobs:
           exit 1
         fi
 
-        # 1. 如果存在 debian 目录则修改架构（虽然 shairport-sync 没有，但别的组件可能有）
+        # 1. 架构修改为 amd64
         if [ -f "$PKG_DIR/debian/control" ]; then
           sed -i 's/Architecture: arm64/Architecture: amd64/g' "$PKG_DIR/debian/control"
           sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PKG_DIR/debian/control"
         fi
 
-        # 2. 深度清除所有针对树莓派/ARM 的硬件编译优化参数（包括全局 scripts 目录下的公共脚本）
-        # 这一步非常重要，因为 shairport-sync 依赖了全局的 scripts/ 文件夹
+        # 2. 全局清除所有针对树莓派/ARM 的硬件编译优化参数
         find . -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
           sed -i 's/-march=armv8-a+crt//g' "$file"
           sed -i 's/-march=armv8-a//g' "$file"
@@ -70,20 +74,16 @@ jobs:
 
     - name: Execute Build Script
       run: |
-        # 建立 moOde 编译环境所需的本地配置
         mkdir -p scripts
         cp scripts/setenv.sh.example scripts/setenv.sh 2>/dev/null || true
         
-        # 伪造打包者信息
         export DEBFULLNAME="moOde Debian Trixie Porting"
         export DEBEMAIL="trixie-x86@moode-player.org"
-        # 规避 tput 报错
         export TERM=xterm
         
         PKG_DIR="packages/${{ github.event.inputs.package_name }}"
         cd "$PKG_DIR"
         
-        # 优先执行 build.sh 或 compile.sh
         if [ -f "./build.sh" ]; then
           chmod +x ./build.sh
           ./build.sh
@@ -100,7 +100,6 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: moode-trixie-x86_64-${{ github.event.inputs.package_name }}
-        # 考虑到 moOde 脚本打包的落脚点可能在各个地方，我们扩大搜索范围搜索编译出的 .deb 文件
         path: |
           ./**/*.deb
           ../**/*.deb
