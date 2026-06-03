@@ -25,7 +25,6 @@ jobs:
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
         if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        # 预先补充 libasound2-dev，这是编译任何 ALSA 插件（包括 peppy-alsa）都无法绕过的核心底层依赖
         apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev
         gem install --no-document fpm
         printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done\nexec "$@"\n' > /usr/local/bin/sudo
@@ -112,18 +111,29 @@ jobs:
           sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
 
-    # 核心拦截修正：针对 peppy-alsa 缺乏顶层构建体系导致的空包缺陷进行直接补救
+    # 核心拦截修正：不仅拦截脚本，还注入自动化构建和强行修正打包逻辑
     - name: Intercept and Fix peppy-alsa Empty Build Buildinfo
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "peppy-alsa" ]; then
-          echo "🔧 侦测到目标为 peppy-alsa，开始修正脚本内 dh_make 产生空包的编译死结..."
+          echo "🔧 发现目标组件为 peppy-alsa，开始注入补丁..."
           BUILD_SCRIPT="packages/peppy-alsa/build.sh"
           if [ -f "$BUILD_SCRIPT" ]; then
-            # 1. 强行将 dh_make 模板生成的 broken 包名修复为正常的应用名
-            sed -i 's/peppy-alsaBROKEN/peppy-alsa/g' "$BUILD_SCRIPT" 2>/dev/null || true
-            # 2. 注入核心修复：在 dpkg-buildpackage 执行时，追加 --no-sign 以免签名受阻，同时允许底层空资产通过
-            sed -i 's/dpkg-buildpackage -us -uc -b/dpkg-buildpackage -us -uc -b --allow-empty/g' "$BUILD_SCRIPT" 2>/dev/null || true
+            # 1. 将原有的“带BROKEN”的包名替换
+            sed -i 's/peppy-alsaBROKEN/peppy-alsa/g' "$BUILD_SCRIPT"
+            
+            # 2. 核心补丁：在 build.sh 里的 dpkg-buildpackage 执行前，强行在源码里生成一个可用的顶层 Makefile，并改写 debian/rules
+            # 让它知道要把编译出来的 libasound_module_pcm_peppyalsa.so 塞到系统的 alsa 插件目录里去。
+            sed -i '/dpkg-buildpackage/i \
+            cd peppy-alsa-*\n\
+            printf "all:\\n\\tgcc -shared -fPIC -O2 src/peppyalsa.c src/meter.c src/spectrum.c -o libasound_module_pcm_peppyalsa.so -lasound\\n\\ninstall:\\n\\tmkdir -p \\$(DESTDIR)/usr/lib/x86_64-linux-gnu/alsa-lib\\n\\tcp libasound_module_pcm_peppyalsa.so \\$(DESTDIR)/usr/lib/x86_64-linux-gnu/alsa-lib/\\n" > Makefile\n\
+            if [ -d debian ]; then\n\
+              printf "#!/usr/bin/make -f\\n%%:\\n\\tdh \\\\\$@\\n\\noverride_dh_auto_install:\\n\\t\\$(MAKE) install DESTDIR=\\$(CURDIR)/debian/peppy-alsa\\n" > debian/rules\n\
+              chmod +x debian/rules\n\
+              sed -i "s/peppy-alsaBROKEN/peppy-alsa/g" debian/control\n\
+              sed -i "s/Architecture: .*/Architecture: amd64/g" debian/control\n\
+            fi\n\
+            cd ..' "$BUILD_SCRIPT"
           fi
         fi
 
