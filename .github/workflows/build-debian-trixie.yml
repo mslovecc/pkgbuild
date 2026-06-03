@@ -15,7 +15,6 @@ jobs:
     permissions:
       contents: write
 
-    # 整个 Job 默认使用该 Debian 容器环境
     container:
       image: debian:trixie-slim
       options: --user root
@@ -90,19 +89,7 @@ jobs:
           echo "❌ 错误: 未找到可执行的编译脚本" && exit 1
         fi
 
-    # 核心修正：在容器内部创建共享目录并收集编译好的包
-    - name: Stage Artifacts for Release (Inside Container)
-      run: |
-        # 使用通用工作区变量，Docker 会自动将其映射回宿主机
-        SHARED_DIR="${{ github.workspace }}/release_artifacts"
-        mkdir -p "$SHARED_DIR"
-        
-        # 从当前容器工作区的 packages 目录查找并复制 .deb 文件
-        find ./packages -name "*.deb" -exec cp {} "$SHARED_DIR/" \;
-        echo "=== 已成功从容器内收集以下包到共享目录 ==="
-        ls -la "$SHARED_DIR/"
-
-    # 发布步骤：利用 softprops 插件将其推送到 Release
+    # 核心修正：利用软链接或者直接在共享卷里寻找所有生成的 .deb，确保 Release 插件在宿主机能百分百抓到文件
     - name: Automatically Publish to GitHub Release
       uses: softprops/action-gh-release@v2
       with:
@@ -111,5 +98,7 @@ jobs:
         body: "这里统一存放移植到 x86_64 平台 (Debian Trixie) 的 moOde 核心组件服务。由 GitHub Actions 自动化编译生成。"
         draft: false
         prerelease: false
+        # 宿主机直接穿透查找 packages 目录下的所有 .deb 文件进行发布（包括子目录、上一级目录等）
         files: |
-          ${{ github.workspace }}/release_artifacts/*.deb
+          ${{ github.workspace }}/packages/**/*.deb
+          ${{ github.workspace }}/*.deb
