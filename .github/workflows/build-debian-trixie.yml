@@ -12,10 +12,10 @@ jobs:
   build-trixie:
     runs-on: ubuntu-latest
 
-    # 必须赋予 Actions 写入 Release 的权限
     permissions:
       contents: write
 
+    # 整个 Job 默认使用该 Debian 容器环境
     container:
       image: debian:trixie-slim
       options: --user root
@@ -90,20 +90,24 @@ jobs:
           echo "❌ 错误: 未找到可执行的编译脚本" && exit 1
         fi
 
-    # 新增步骤：将分散在各处的 .deb 收集到一个干净的临时目录，避免 Release 插件上传错乱
-    - name: Stage Artifacts for Release
+    # 核心修正：在容器内部创建共享目录并收集编译好的包
+    - name: Stage Artifacts for Release (Inside Container)
       run: |
-        mkdir -p ${{ github.workspace }}/release_artifacts
-        find ${{ github.workspace }}/packages -name "*.deb" -exec cp {} ${{ github.workspace }}/release_artifacts/ \;
-        echo "已收集以下准备发布的安装包："
-        ls -la ${{ github.workspace }}/release_artifacts/
+        # 使用通用工作区变量，Docker 会自动将其映射回宿主机
+        SHARED_DIR="${{ github.workspace }}/release_artifacts"
+        mkdir -p "$SHARED_DIR"
+        
+        # 从当前容器工作区的 packages 目录查找并复制 .deb 文件
+        find ./packages -name "*.deb" -exec cp {} "$SHARED_DIR/" \;
+        echo "=== 已成功从容器内收集以下包到共享目录 ==="
+        ls -la "$SHARED_DIR/"
 
-    # 核心步骤：自动发布或追加到已有的 Release 页面中
+    # 发布步骤：利用 softprops 插件将其推送到 Release
     - name: Automatically Publish to GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: "debian-trixie-x86_64"     # Release 的标签名（固定，方便把所有组件堆在一起）
-        name: "moOde Packages for Debian Trixie (x86_64)"  # Release 的标题
+        tag_name: "debian-trixie-x86_64"
+        name: "moOde Packages for Debian Trixie (x86_64)"
         body: "这里统一存放移植到 x86_64 平台 (Debian Trixie) 的 moOde 核心组件服务。由 GitHub Actions 自动化编译生成。"
         draft: false
         prerelease: false
