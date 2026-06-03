@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: libnpupnp, libupnpp, upmpdcli, mpd)'
+        description: '要编译的组件名称 (例如: bluez-alsa, libnpupnp, libupnpp, upmpdcli)'
         required: true
-        default: 'libnpupnp'
+        default: 'bluez-alsa'
 
 jobs:
   build-trixie:
@@ -22,6 +22,14 @@ jobs:
     steps:
     - name: Prepare Container Environment
       run: |
+        # 核心修正：解锁 Debian Trixie 的 contrib、non-free 和 non-free-firmware 软件源，允许安装 libfdk-aac-dev
+        if [ -f /etc/apt/sources.list.d/debian.sources ]; then
+          sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources
+        fi
+        if [ -f /etc/apt/sources.list ]; then
+          sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list
+        fi
+
         apt-get update
         # 补齐基础网络和编译工具，增加了 jq 用来解析 API JSON
         apt-get install -y --no-install-recommends \
@@ -53,7 +61,7 @@ jobs:
       run: |
         git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git .
 
-    # 核心修正：使用原生的 curl + GitHub API 获取并安装之前编译好的所有 .deb 依赖包
+    # 使用原生的 curl + GitHub API 获取并安装之前编译好的所有 .deb 依赖包
     - name: Pre-install Previously Compiled Dependencies from Release
       run: |
         echo "正在通过 GitHub API 检查已发布的 x86_64 依赖包..."
