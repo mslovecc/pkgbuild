@@ -1,0 +1,108 @@
+name: Build moOde Packages for Debian Trixie (x86_64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: '要编译的组件目录名称 (例如: shairport-sync, mpd, upmpdcli)'
+        required: true
+        default: 'shairport-sync'
+
+jobs:
+  build-trixie:
+    runs-on: ubuntu-latest # 宿主机使用最新的 Ubuntu 即可
+
+    # 使用 Debian Trixie 官方容器环境进行编译
+    container:
+      image: debian:trixie-slim
+      options: --user root # 确保拥有 root 权限安装依赖
+
+    steps:
+    - name: Prepare Container Environment
+      run: |
+        # 1. 更新 Debian Trixie 源并安装基础工具（容器默认非常精简）
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      # 注意：由于 actions/checkout 依赖 node 环境，Debian 容器内可能需要特殊处理。
+      # 如果此步因 node 缺失报错，可改用普通的 git clone 命令，如下方备用方案。
+
+    - name: Patch and Fix ARM Hardcoding
+      run: |
+        PKG_DIR="${{ github.event.inputs.package_name }}"
+        echo "正在优化组件: $PKG_DIR 适配 Debian Trixie (x86_64)..."
+        
+        if [ ! -d "$PKG_DIR" ]; then
+          echo "❌ 错误: 找不到目录 $PKG_DIR" && exit 1
+        fi
+
+        # 1. 强制修改 Debian 架构限制为 amd64
+        if [ -f "$PKG_DIR/debian/control" ]; then
+          sed -i 's/Architecture: arm64/Architecture: amd64/g' "$PKG_DIR/debian/control"
+          sed -i 's/Architecture: armhf/Architecture: amd64/g' "$PKG_DIR/debian/control"
+          echo "已将 debian/control 中的架构修改为 amd64"
+        fi
+
+        # 2. 深度清除所有针对树莓派/ARM 的硬件编译优化参数
+        find "$PKG_DIR" -type f \( -name "*.sh" -o -name "rules" \) | while read -r file; do
+          sed -i 's/-march=armv8-a+crt//g' "$file"
+          sed -i 's/-march=armv8-a//g' "$file"
+          sed -i 's/-mfpu=neon//g' "$file"
+          sed -i 's/-mfloat-abi=hard//g' "$file"
+          sed -i 's/-mcpu=cortex-a72//g' "$file"
+          sed -i 's/-mcpu=cortex-a53//g' "$file"
+          sed -i 's/ARCH=arm64/ARCH=amd64/g' "$file"
+          sed -i 's/ARCH=armhf/ARCH=amd64/g' "$file"
+        done
+        echo "已清除 ARM 硬件特定优化编译参数"
+
+    - name: Auto-install Debian Trixie Dependencies
+      run: |
+        PKG_DIR="${{ github.event.inputs.package_name }}"
+        cd "$PKG_DIR"
+        
+        # 利用 equivs 在 Debian Trixie 源中自动寻找并安装 x86_64 的开发依赖包
+        if [ -d "debian" ]; then
+          echo "正在从 Debian Trixie 源自动下载安装编译依赖..."
+          # Trixie 中部分包安装可能有强依赖冲突，使用 Debug 模式输出
+          mk-build-deps -i -r -t "apt-get -o Debug::pkgProblemResolver=yes --no-install-recommends -y" debian/control
+        else
+          echo "未发现 debian 目录，跳过自动依赖安装。"
+        fi
+
+    - name: Execute Build Script
+      run: |
+        PKG_DIR="${{ github.event.inputs.package_name }}"
+        
+        # 建立 moOde 编译环境所需的虚拟配置
+        mkdir -p scripts
+        cp scripts/setenv.sh.example scripts/setenv.sh 2>/dev/null || true
+        
+        export DEBFULLNAME="moOde Debian Trixie Porting"
+        export DEBEMAIL="trixie-x86@moode-player.org"
+        
+        cd "$PKG_DIR"
+        
+        # 执行编译
+        if [ -f "./build.sh" ]; then
+          chmod +x ./build.sh
+          ./build.sh
+        elif [ -f "./compile.sh" ]; then
+          chmod +x ./compile.sh
+          ./compile.sh
+        elif [ -f "debian/rules" ]; then
+          dpkg-buildpackage -us -uc -b
+        else
+          echo "❌ 错误: 未找到可执行的编译脚本或 debian/rules" && exit 1
+        fi
+
+    - name: Collect and Upload Trixie .deb Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: moode-trixie-x86_64-${{ github.event.inputs.package_name }}
+        path: |
+          ./**/*.deb
+          ../*.deb
