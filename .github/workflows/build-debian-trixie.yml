@@ -118,31 +118,41 @@ jobs:
           sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
 
-    # 核心热拦截一：修复 peppy-alsa 污染并避开转义黑洞
+    # 核心热拦截一：精准锚点劫持，解决 peppy-alsa 污染与构建空包问题
     - name: Intercept and Hot-Patch peppy-alsa Packaging
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "peppy-alsa" ]; then
-          echo "🔧 发现目标组件 peppy-alsa，正在启用防呆级降维注入..."
+          echo "🔧 发现目标组件 peppy-alsa，正在启用精准锚点劫持..."
           
-          # 1. 提前在宿主机把完美无瑕的 rules 文件写好，彻底避开 sed 嵌套转义！
+          # 1. 在宿主机准备完美的 rules 编译指令文件
           echo -e "#!/usr/bin/make -f\n%:\n\tdh \$@\n\noverride_dh_auto_build:\n\tgcc -shared -fPIC -O2 src/peppyalsa.c src/meter.c src/spectrum.c -o libasound_module_pcm_peppyalsa.so -lasound -lfftw3" > /tmp/peppy_rules
+          
+          # 2. 编写独立 Hook 钩子脚本，专门在 dh_make 生成完、dpkg 开始打包前的瞬间运行！
+          cat << 'EOF' > /tmp/peppy_fix.sh
+          #!/bin/bash
+          echo "💥 [HOOK] 正在执行包名修复与规则覆盖 💥"
+          # 此时处于 peppy-alsa 的源码目录下
+          if [ -f debian/control ]; then
+            sed -i "s/peppy-alsaBROKEN/peppy-alsa/g" debian/control
+            sed -i "s/Architecture: arm./Architecture: amd64/g" debian/control
+          fi
+          # 生成指向 amd64 库路径的安装说明
+          echo "libasound_module_pcm_peppyalsa.so usr/lib/x86_64-linux-gnu/alsa-lib" > debian/peppy-alsa.install
+          cp /tmp/peppy_rules debian/rules
+          chmod +x debian/rules
+          echo "✅ [HOOK] 修复完毕，交还控制权给编译器"
+          EOF
+          chmod +x /tmp/peppy_fix.sh
           
           BUILD_SCRIPT="packages/peppy-alsa/build.sh"
           if [ -f "$BUILD_SCRIPT" ]; then
             sed -i 's/rm debian\/pep/rm -f debian\/pep/g' "$BUILD_SCRIPT"
-            sed -i '/_build_deb/i \
-        echo "================================================="\n\
-        echo "💥 正在拦截进入源码核心区: \$(pwd)"\n\
-        if [ -f debian/control ]; then\n\
-          sed -i "s/peppy-alsaBROKEN/peppy-alsa/g" debian/control\n\
-          sed -i "s/Architecture: arm64/Architecture: amd64/g" debian/control\n\
-        fi\n\
-        echo "libasound_module_pcm_peppyalsa.so usr/lib/x86_64-linux-gnu/alsa-lib" > debian/peppy-alsa.install\n\
-        cp /tmp/peppy_rules debian/rules\n\
-        chmod +x debian/rules\n\
-        echo "✅ 元数据结构重写完成，准备起飞！"\n\
-        echo "================================================="' "$BUILD_SCRIPT"
+            
+            # 【核心绝杀】把脚本原有的打包指令，替换为 "先执行修复钩子 && 再执行原打包指令"
+            sed -i 's/dpkg-buildpackage/\/tmp\/peppy_fix.sh \&\& dpkg-buildpackage/g' "$BUILD_SCRIPT"
+            
+            echo "✅ 拦截钩子植入完成，准备起飞！"
           fi
         fi
 
