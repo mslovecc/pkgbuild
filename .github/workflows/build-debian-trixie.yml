@@ -111,21 +111,24 @@ jobs:
           sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
 
-    # 精准热拦截：为 debhelper 提供明确的安装映射文件 (.install) 指引文件流向
+    # 核心热拦截：在真正的编译战场目录 `build/peppy-alsa-*` 生成后、调用 `_build_deb` 之前实施精准强插！
     - name: Intercept and Hot-Patch peppy-alsa Packaging
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "peppy-alsa" ]; then
-          echo "🔧 发现目标组件 peppy-alsa，正在注入标准交付规则..."
+          echo "🔧 发现目标组件 peppy-alsa，正在注入战场级交付规则..."
           BUILD_SCRIPT="packages/peppy-alsa/build.sh"
           if [ -f "$BUILD_SCRIPT" ]; then
-            # 1. 修复原厂脚本中错误的强行删除，改为带 -f 的静音删除
+            # 1. 修复原厂脚本中错误的强行删除
             sed -i 's/rm debian\/pep/rm -f debian\/pep/g' "$BUILD_SCRIPT"
             
-            # 2. 精准前置注入控制逻辑：修改架构、注入原生 rules 编译规则，并显式生成 .install 指引文件
-            sed -i '/dpkg-buildpackage/i \
+            # 2. 深入底层：改在 rbl_build 内部真正执行 _build_deb 的前一刻进行劫持！
+            # 此时脚本已经执行完 _rbl_change_to_build_root 和 _rbl_cd_source_dir，
+            # 我们的 pwd 此时正是 `build/peppy-alsa-2024.02.10/` 核心源码区！
+            sed -i '/_build_deb/i \
         echo "================================================="\n\
-        echo "💥 正在强制修正当前目录下的 Debian 元数据结构..."\n\
+        echo "💥 正在拦截进入源码核心区: \$(pwd)"\n\
+        echo "💥 正在强制修正实际编译战场下的 Debian 元数据结构..."\n\
         sed -i "s/Architecture: arm64/Architecture: amd64/g" debian/control\n\
         echo "libasound_module_pcm_peppyalsa.so usr/lib/x86_64-linux-gnu/alsa-lib" > debian/peppy-alsa.install\n\
         printf "#%s\\n%%:\\n\\tdh \\\\\$@\\n\\noverride_dh_auto_build:\\n\\tgcc -shared -fPIC -O2 src/peppyalsa.c src/meter.c src/spectrum.c -o libasound_module_pcm_peppyalsa.so -lasound -lfftw3\\n" "!/usr/bin/make -f" > debian/rules\n\
