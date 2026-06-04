@@ -25,7 +25,6 @@ jobs:
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
         if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        # 预装完整编译链及 peppy-alsa 声明的 libfftw3-dev 依赖
         apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev libfftw3-dev python3-yaml dh-python python3-setuptools python3-build python3-installer
         gem install --no-document fpm
         printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done\nexec "$@"\n' > /usr/local/bin/sudo
@@ -112,22 +111,24 @@ jobs:
           sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
 
-    # 核心精准切入：在 peppy-alsa 脚本运行完 control 覆盖的后一秒，修正架构缺陷并补全 Makefile
+    # 精准热拦截：纠正 peppy-alsa 路径问题，不污染源码区，直接通过 rules 元数据控制整个编译流程
     - name: Intercept and Hot-Patch peppy-alsa Packaging
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "peppy-alsa" ]; then
-          echo "🔧 侦测到 peppy-alsa 编译链目标，正在改写其构建脚本核心区..."
+          echo "🔧 发现目标组件 peppy-alsa，正在注入无污染编译控制链..."
           BUILD_SCRIPT="packages/peppy-alsa/build.sh"
           if [ -f "$BUILD_SCRIPT" ]; then
-            # 精准定位到：在 cp $BASE_DIR/control debian/control 的后面注入修复代码
-            sed -i '/cp \$BASE_DIR\/control debian\/control/a \
-        echo "================================================="\\n\
-        echo "💥 正在强制劫持并改写动态生成的 peppy-alsa 构建区..."\\n\
-        sed -i "s/Architecture: arm64/Architecture: amd64/g" debian/control\\n\
-        printf "all:\\n\\tgcc -shared -fPIC -O2 src/peppyalsa.c src/meter.c src/spectrum.c -o libasound_module_pcm_peppyalsa.so -lasound -lfftw3\\n\\ninstall:\\n\\tmkdir -p \\$(DESTDIR)/usr/lib/x86_64-linux-gnu/alsa-lib\\n\\tcp libasound_module_pcm_peppyalsa.so \\$(DESTDIR)/usr/lib/x86_64-linux-gnu/alsa-lib/\\n" > Makefile\\n\
-        printf "#!/usr/bin/make -f\\n%%:\\n\\tdh \\\\\$@\\n\\noverride_dh_auto_install:\\n\\t\\$(MAKE) install DESTDIR=\\$(CURDIR)/debian/peppy-alsa\\n" > debian/rules\\n\
-        chmod +x debian/rules\\n\
+            # 1. 修复原厂脚本中错误的强行删除，改为带 -f 的静音删除，防止由于文件不存在卡死流程
+            sed -i 's/rm debian\/pep/rm -f debian\/pep/g' "$BUILD_SCRIPT"
+            
+            # 2. 定位到 dpkg-buildpackage 执行前，原地修改合规的 control 架构，并利用 rules 机制在打包期进行纯净编译
+            sed -i '/dpkg-buildpackage/i \
+        echo "================================================="\n\
+        echo "💥 正在强制修正当前目录下的 Debian 元数据结构..."\n\
+        sed -i "s/Architecture: arm64/Architecture: amd64/g" debian/control\n\
+        printf "#!/usr/bin/make -f\\n%%:\\n\\tdh \\\\\$@\\n\\noverride_dh_auto_build:\\n\\tgcc -shared -fPIC -O2 src/peppyalsa.c src/meter.c src/spectrum.c -o libasound_module_pcm_peppyalsa.so -lasound -lfftw3\\n\\noverride_dh_auto_install:\\n\\tmkdir -p \\\$(CURDIR)/debian/peppy-alsa/usr/lib/x86_64-linux-gnu/alsa-lib\\n\\tcp libasound_module_pcm_peppyalsa.so \\\$(CURDIR)/debian/peppy-alsa/usr/lib/x86_64-linux-gnu/alsa-lib/\\n" > debian/rules\n\
+        chmod +x debian/rules\n\
         echo "================================================="' "$BUILD_SCRIPT"
           fi
         fi
