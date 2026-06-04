@@ -25,14 +25,14 @@ jobs:
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
         if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev libfftw3-dev python3-yaml dh-python python3-setuptools python3-build python3-installer rsync sqlite3 python3-pip python3-setuptools
         
-        # 安装 Node.js 与 Gulp 编译链环境（针对 moode-player 前端构建）
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-        apt-get install -y nodejs
+        # 1. 直接安装 Debian Trixie 原生自带的 nodejs 和 npm，彻底规避官方外部源导致的包冲突
+        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev libfftw3-dev python3-yaml dh-python python3-setuptools python3-build python3-installer rsync sqlite3 python3-pip nodejs npm
+        
+        # 2. 安装全局的 gulp-cli 工具
         npm install -g gulp-cli
 
-        # 安装 Ruby 打包引擎 fpm
+        # 3. 安装 Ruby 打包引擎 fpm
         gem install --no-document fpm
         printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done\nexec "$@"\n' > /usr/local/bin/sudo
         chmod +x /usr/local/bin/sudo
