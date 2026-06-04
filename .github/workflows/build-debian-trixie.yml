@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: upmpdcli, mpd2cdspvolume, peppy-alsa, bluez-alsa)'
+        description: '要编译的组件名称 (例如: upmpdcli, pycamilladsp, mpd2cdspvolume, peppy-alsa)'
         required: true
-        default: 'peppy-alsa'
+        default: 'pycamilladsp'
 
 jobs:
   build-trixie:
@@ -25,7 +25,8 @@ jobs:
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
         if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev
+        # 补齐关键依赖：增加 python3-yaml, dh-python 以及现代 pybuild 所依赖的构建生态组件
+        apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev python3-yaml dh-python python3-setuptools python3-build python3-installer
         gem install --no-document fpm
         printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done\nexec "$@"\n' > /usr/local/bin/sudo
         chmod +x /usr/local/bin/sudo
@@ -111,29 +112,21 @@ jobs:
           sed -i 's/cp \*\.deb \.\./cp \*\.deb \.\.\/\.\./g' "$BUILD_SCRIPT"
         fi
 
-    # 核心替代：针对 peppy-alsa 放弃其原本的 build.sh，直接由本地 Action 纯净重写编译环境，避免一切嵌套带来的空包死锁。
     - name: Native Build Rewrite for peppy-alsa
       run: |
         TARGET_PKG="${{ github.event.inputs.package_name }}"
         if [ "$TARGET_PKG" = "peppy-alsa" ]; then
           echo "🚀 启动 peppy-alsa 的 Action 本地原生构建流程..."
           cd packages/peppy-alsa
-          
-          # 模拟上游拉取源码，但不交给它不成熟的脚本打包
           git clone https://github.com/project-owner/peppy-alsa.git peppy-alsa-2024.02.10 || git clone https://github.com/bitkeeper/peppy-alsa.git peppy-alsa-2024.02.10 || true
           cd peppy-alsa-2024.02.10
-          
-          # 原地注入 100% 针对 x86_64（amd64）的 Makefile
           echo 'all:' > Makefile
           echo '	gcc -shared -fPIC -O2 src/peppyalsa.c src/meter.c src/spectrum.c -o libasound_module_pcm_peppyalsa.so -lasound' >> Makefile
           echo 'install:' >> Makefile
           echo '	mkdir -p $(DESTDIR)/usr/lib/x86_64-linux-gnu/alsa-lib' >> Makefile
           echo '	cp libasound_module_pcm_peppyalsa.so $(DESTDIR)/usr/lib/x86_64-linux-gnu/alsa-lib/' >> Makefile
-          
-          # 原地重组标准的 Debian 目录
           mkdir -p debian
           echo "13" > debian/compat
-          
           echo "Source: peppy-alsa" > debian/control
           echo "Section: sound" >> debian/control
           echo "Priority: optional" >> debian/control
@@ -145,18 +138,13 @@ jobs:
           echo "Architecture: amd64" >> debian/control
           echo "Depends: \${shlibs:Depends}, \${misc:Depends}" >> debian/control
           echo "Description: Peppy ALSA plugin" >> debian/control
-          
           echo '#!/usr/bin/make -f' > debian/rules
           echo '%:' >> debian/rules
           echo '	dh $@' >> debian/rules
           echo 'override_dh_auto_install:' >> debian/rules
           echo '	$(MAKE) install DESTDIR=$(CURDIR)/debian/peppy-alsa' >> debian/rules
           chmod +x debian/rules
-          
-          # 直接开始标准 Debian 构建
           dpkg-buildpackage -us -uc -b
-          
-          # 把生成的 deb 移至工作流可识别位置，然后创建一个假的 build.sh 骗过后面的执行步骤
           cd ..
           cp *.deb ../../ 2>/dev/null || true
           echo '#!/bin/sh' > build.sh
