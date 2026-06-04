@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: '要编译的组件名称 (例如: upmpdcli, pycamilladsp, mpd2cdspvolume, peppy-alsa)'
+        description: '要编译的组件名称 (例如: upmpdcli, pycamilladsp, shairport-sync-metadata-reader, peppy-alsa)'
         required: true
-        default: 'pycamilladsp'
+        default: 'shairport-sync-metadata-reader'
 
 jobs:
   build-trixie:
@@ -25,7 +25,6 @@ jobs:
         if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources; fi
         if [ -f /etc/apt/sources.list ]; then sed -i 's/trixie main/trixie main contrib non-free non-free-firmware/g' /etc/apt/sources.list; fi
         apt-get update
-        # 补齐关键依赖：增加 python3-yaml, dh-python 以及现代 pybuild 所依赖的构建生态组件
         apt-get install -y --no-install-recommends git build-essential devscripts debhelper dh-autoreconf fakeroot equivs sed ca-certificates curl wget ncurses-base pkg-config jq debian-keyring dpkg-dev meson python3-dev libtool-bin apt-transport-https swig ruby ruby-dev rpm dh-make libasound2-dev python3-yaml dh-python python3-setuptools python3-build python3-installer
         gem install --no-document fpm
         printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -E) shift ;; *=*) export "$1"; shift ;; *) break ;; esac; done\nexec "$@"\n' > /usr/local/bin/sudo
@@ -150,6 +149,26 @@ jobs:
           echo '#!/bin/sh' > build.sh
           echo 'echo "Native build completed successfully."' >> build.sh
           chmod +x build.sh
+        fi
+
+    # 核心拦截修正：针对 shairport-sync-metadata-reader 的 build.sh 注入模板覆盖逻辑，避开 patch 冲突
+    - name: Intercept and Fix shairport-sync-metadata-reader Patch Conflict
+      run: |
+        TARGET_PKG="${{ github.event.inputs.package_name }}"
+        if [ "$TARGET_PKG" = "shairport-sync-metadata-reader" ]; then
+          echo "🔧 侦测到目标组件，正在改写 build.sh 以绕过新版 dh_make 的 copyright 冲突..."
+          BUILD_SCRIPT="packages/shairport-sync-metadata-reader/build.sh"
+          if [ -f "$BUILD_SCRIPT" ]; then
+            # 在 dh_make 之后，rbl_patch 之前，强行重构合规的 copyright 文件的生成逻辑，并用安全方式抹掉补丁中的第二段
+            sed -i '/rm ..\/${PKGNAME}_\${PKGVERSION}.tar.gz/a \
+        printf "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\\nSource: https://github.com/mikebrady/shairport-sync-metadata-reader\\nUpstream-Name: shairport-sync-metadata-reader\\n\\nFiles: *\\nCopyright: 2015 Mike Brady <mikebrady@eircom.net>\\nLicense: MIT\\n\\nFiles: debian/*\\nCopyright: 2025 Bitkeeper <bitkeeper@users.noreply.github.com>\\nLicense: MIT\\n" > debian/copyright' "$BUILD_SCRIPT"
+            
+            # 既然 copyright 我们已经手动生成好了，直接把原补丁文件里的 copyright 段干掉，只保留 control 段的修改
+            PATCH_FILE="packages/shairport-sync-metadata-reader/debian-copyright.patch"
+            if [ -f "$PATCH_FILE" ]; then
+              sed -i '/--- shairport-sync-metadata-reader-1.0.2.*/,$d' "$PATCH_FILE"
+            fi
+          fi
         fi
 
     - name: Resolve Precise Dependencies for Target
